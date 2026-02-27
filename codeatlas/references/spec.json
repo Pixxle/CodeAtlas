@@ -81,6 +81,14 @@
       "slack_intel_json"
     ]
   },
+  "report_style": {
+    "human_readable": true,
+    "requirements": [
+      "Use narrative prose in each section, not only metric lists.",
+      "For major findings, include Finding, Evidence, Risk, Recommended action, and Confidence.",
+      "Include infrastructure/runtime posture details when deployment artifacts are detected or absent."
+    ]
+  },
   "workflow": {
     "id": "codeatlas_tdd",
     "steps": [
@@ -97,22 +105,33 @@
       "compute_security_maturity_index",
       "synthesize_report_and_scores",
       "render_pdf_from_json"
+    ],
+    "portfolio_support": {
+      "enabled": true,
+      "description": "When the root folder contains many repositories, run per-repo assessments and synthesize a combined report with a human-readable PDF."
+    },
+    "sub_agents": [
+      "repo_cartographer",
+      "code_health_auditor",
+      "staleness_analyst",
+      "dependency_auditor",
+      "infra_devops_reviewer",
+      "security_compliance",
+      "data_layer_reviewer",
+      "team_process_inferencer"
     ]
   },
   "reporting": {
     "report_sections": [
       "Executive Summary",
-      "Overall Score & Risk",
       "Architecture Overview",
       "Codebase Health",
       "Staleness & Change Velocity",
       "Dependencies & Supply Chain",
       "DevOps & Operability",
-      "Security Maturity Index",
-      "Security Findings (incl. Git History Secrets)",
+      "Security & Compliance",
       "Data Layer & Integrity",
       "Team/Process Signals",
-      "Slack Signals (if enabled)",
       "Risk Matrix",
       "Recommendations",
       "12-18 Month Remediation Roadmap",

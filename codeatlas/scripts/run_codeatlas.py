@@ -158,6 +158,29 @@ IGNORE_DIR_MARKERS = {
     "target",
 }
 
+AUTH_SIGNAL_PATTERNS: dict[str, re.Pattern[str]] = {
+    "jwt_usage": re.compile(r"\b(jwt|bearer)\b", re.I),
+    "oauth_oidc": re.compile(r"\b(oauth|oidc|openid)\b", re.I),
+    "auth_middleware": re.compile(r"\b(authenticate|authorization|authorize)\b", re.I),
+    "session_or_cookie": re.compile(r"\b(session|cookie)\b", re.I),
+}
+
+ANTI_PATTERN_PATTERNS: dict[str, re.Pattern[str]] = {
+    "todo_fixme_hack": re.compile(r"\b(TODO|FIXME|HACK|XXX)\b"),
+    "broad_exception_python": re.compile(r"except\s+Exception\b"),
+    "broad_exception_csharp": re.compile(r"catch\s*\(\s*Exception\b"),
+    "insecure_http": re.compile(r"http://", re.I),
+    "weak_crypto": re.compile(r"\b(md5|sha1)\b", re.I),
+    "tls_verification_disabled": re.compile(r"(verify\s*=\s*False|insecure_skip_verify)", re.I),
+    "raw_sql_concatenation": re.compile(r"(SELECT|INSERT|UPDATE|DELETE).*(\+|\{)", re.I),
+}
+
+INFRA_YAML_KIND_PATTERNS: dict[str, re.Pattern[str]] = {
+    "k8s_deployment": re.compile(r"^\s*kind:\s*(Deployment|StatefulSet|DaemonSet)\s*$", re.I),
+    "k8s_service": re.compile(r"^\s*kind:\s*(Service|Ingress)\s*$", re.I),
+    "k8s_job": re.compile(r"^\s*kind:\s*(Job|CronJob)\s*$", re.I),
+}
+
 
 def run(cmd: list[str], cwd: str | None = None, check: bool = True) -> str:
     result = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True)
@@ -1022,6 +1045,300 @@ def detect_devops_signals(repo_path: Path, tracked_files: list[str]) -> dict[str
     }
 
 
+def sample_values(values: Iterable[str], limit: int = 8) -> list[str]:
+    return sorted(dict.fromkeys(v for v in values if v))[:limit]
+
+
+def analyze_infrastructure_landscape(
+    repo_path: Path,
+    tracked_files: list[str],
+    devops_signals: dict[str, bool],
+    evidence: EvidenceIndex,
+) -> dict[str, Any]:
+    infra_evidence = evidence.add(
+        "command",
+        "git ls-files + static filename/kind scanning for infrastructure artifacts",
+        "Infrastructure and deployment artifact discovery",
+    )
+
+    dockerfiles = [f for f in tracked_files if Path(f).name.lower() == "dockerfile"]
+    compose_files = [
+        f for f in tracked_files if "docker-compose" in Path(f).name.lower() or Path(f).name.lower().endswith("compose.yml")
+    ]
+    k8s_files = [
+        f
+        for f in tracked_files
+        if any(token in f.lower() for token in ["k8s", "kubernetes", "manifests", "charts"])
+    ]
+    terraform_files = [f for f in tracked_files if f.lower().endswith((".tf", ".tfvars"))]
+    helm_files = [f for f in tracked_files if Path(f).name.lower() in {"chart.yaml", "values.yaml"}]
+    cloudformation_files = [
+        f
+        for f in tracked_files
+        if "cloudformation" in f.lower() or Path(f).name.lower().endswith((".template", ".cfn.yml", ".cfn.yaml"))
+    ]
+    pipeline_files = [
+        f
+        for f in tracked_files
+        if f.lower().startswith(".github/workflows/")
+        or f.lower() in {".gitlab-ci.yml", "jenkinsfile", "azure-pipelines.yml"}
+    ]
+
+    # Detect Kubernetes kinds even when files are not under explicit k8s paths.
+    yaml_candidates = [
+        f
+        for f in tracked_files
+        if f.lower().endswith((".yaml", ".yml")) and not f.lower().startswith(".github/")
+    ][:400]
+    kind_hits: dict[str, int] = collections.Counter()
+    kind_hit_files: dict[str, set[str]] = collections.defaultdict(set)
+    for rel_path in yaml_candidates:
+        full_path = repo_path / rel_path
+        if not full_path.exists() or full_path.stat().st_size > 1_000_000:
+            continue
+        if not looks_text(full_path):
+            continue
+        try:
+            lines = full_path.read_text(encoding="utf-8", errors="ignore").splitlines()[:200]
+        except OSError:
+            continue
+        for line in lines:
+            for kind_key, pattern in INFRA_YAML_KIND_PATTERNS.items():
+                if pattern.search(line):
+                    kind_hits[kind_key] += 1
+                    kind_hit_files[kind_key].add(rel_path)
+
+    inferred_runtime_model: list[str] = []
+    if dockerfiles:
+        inferred_runtime_model.append("Containerized services are present (Dockerfile detected).")
+    if compose_files:
+        inferred_runtime_model.append("Local multi-service orchestration appears to use docker-compose.")
+    if devops_signals["kubernetes"] or sum(kind_hits.values()) > 0:
+        inferred_runtime_model.append("Kubernetes-style deployment artifacts are present.")
+    if terraform_files:
+        inferred_runtime_model.append("Infrastructure-as-code via Terraform is present.")
+    if helm_files:
+        inferred_runtime_model.append("Helm charting assets are present for templated Kubernetes deployment.")
+    if not inferred_runtime_model:
+        inferred_runtime_model.append("No explicit deployment/runtime artifacts were detected from repository files.")
+
+    infra_maturity_score = 15
+    if dockerfiles:
+        infra_maturity_score += 18
+    if compose_files:
+        infra_maturity_score += 8
+    if devops_signals["kubernetes"] or sum(kind_hits.values()) > 0:
+        infra_maturity_score += 18
+    if terraform_files:
+        infra_maturity_score += 18
+    if helm_files:
+        infra_maturity_score += 10
+    if pipeline_files:
+        infra_maturity_score += 14
+    if devops_signals["observability"]:
+        infra_maturity_score += 10
+    if devops_signals["backup_signal"]:
+        infra_maturity_score += 9
+    infra_maturity_score = int(clamp_score(infra_maturity_score))
+
+    findings: list[dict[str, Any]] = []
+    if not dockerfiles and not compose_files and not devops_signals["kubernetes"]:
+        findings.append(
+            {
+                "finding": "No explicit deployment packaging signal (container/runtime manifests) was detected",
+                "evidence": [infra_evidence],
+                "risk": "Operational onboarding and environment parity may depend on undocumented manual knowledge",
+                "recommendation": "Codify runtime/deployment model in versioned Docker/Kubernetes or equivalent manifests",
+                "confidence": 0.66,
+            }
+        )
+    if not terraform_files and not cloudformation_files:
+        findings.append(
+            {
+                "finding": "Infrastructure-as-code evidence is limited",
+                "evidence": [infra_evidence],
+                "risk": "Higher risk of environment drift and non-reproducible production changes",
+                "recommendation": "Adopt and enforce IaC for baseline cloud/network/service provisioning",
+                "confidence": 0.69,
+            }
+        )
+    if not devops_signals["observability"]:
+        findings.append(
+            {
+                "finding": "Observability configuration signal is weak",
+                "evidence": [infra_evidence],
+                "risk": "Longer incident detection and diagnosis cycles",
+                "recommendation": "Define baseline telemetry (logs, metrics, traces, alert routing) per service",
+                "confidence": 0.64,
+            }
+        )
+
+    narrative = (
+        f"Infrastructure analysis found {len(dockerfiles)} Dockerfiles, {len(compose_files)} compose files, "
+        f"{len(terraform_files)} Terraform files, and {len(pipeline_files)} pipeline definitions. "
+        f"Inferred infrastructure maturity score is {infra_maturity_score}/100."
+    )
+
+    return {
+        "infra_maturity_score": infra_maturity_score,
+        "deployment_artifacts": {
+            "dockerfiles": sample_values(dockerfiles, 20),
+            "compose_files": sample_values(compose_files, 20),
+            "kubernetes_related_files": sample_values(k8s_files, 30),
+            "terraform_files": sample_values(terraform_files, 30),
+            "helm_files": sample_values(helm_files, 20),
+            "cloudformation_files": sample_values(cloudformation_files, 20),
+            "pipeline_files": sample_values(pipeline_files, 30),
+            "k8s_kinds_detected": dict(kind_hits),
+            "k8s_kind_sample_files": {
+                key: sample_values(values, 10) for key, values in kind_hit_files.items()
+            },
+        },
+        "inferred_runtime_model": inferred_runtime_model,
+        "narrative": narrative,
+        "findings": findings,
+        "evidence": [infra_evidence],
+    }
+
+
+def analyze_code_pattern_signals(
+    repo_path: Path,
+    source_files: list[str],
+    evidence: EvidenceIndex,
+) -> dict[str, Any]:
+    pattern_evidence = evidence.add(
+        "command",
+        "Static regex scan across source files for auth/security and anti-pattern signals",
+        "Code-pattern sub-agent scan",
+    )
+
+    auth_counts: dict[str, int] = collections.Counter()
+    anti_counts: dict[str, int] = collections.Counter()
+    auth_hit_files: dict[str, set[str]] = collections.defaultdict(set)
+    anti_hit_files: dict[str, set[str]] = collections.defaultdict(set)
+
+    scanned = 0
+    for rel_path in sorted(source_files)[:1600]:
+        full_path = repo_path / rel_path
+        if not full_path.exists():
+            continue
+        if full_path.stat().st_size > 800_000:
+            continue
+        if not looks_text(full_path):
+            continue
+        try:
+            content = full_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+
+        scanned += 1
+        for key, pattern in AUTH_SIGNAL_PATTERNS.items():
+            matches = pattern.findall(content)
+            if matches:
+                auth_counts[key] += len(matches)
+                auth_hit_files[key].add(rel_path)
+        for key, pattern in ANTI_PATTERN_PATTERNS.items():
+            matches = pattern.findall(content)
+            if matches:
+                anti_counts[key] += len(matches)
+                anti_hit_files[key].add(rel_path)
+
+    auth_signal_strength = sum(auth_counts.values())
+    anti_signal_pressure = sum(anti_counts.values())
+
+    auth_posture_score = 35
+    if auth_counts["auth_middleware"] > 20:
+        auth_posture_score += 18
+    elif auth_counts["auth_middleware"] > 0:
+        auth_posture_score += 10
+    if auth_counts["jwt_usage"] > 0 or auth_counts["oauth_oidc"] > 0:
+        auth_posture_score += 12
+    if auth_counts["session_or_cookie"] > 0:
+        auth_posture_score += 6
+    if anti_counts["insecure_http"] == 0:
+        auth_posture_score += 8
+    if anti_counts["weak_crypto"] == 0:
+        auth_posture_score += 10
+    auth_posture_score = int(clamp_score(auth_posture_score))
+
+    anti_pattern_pressure_score = int(clamp_score(100 - min(100, anti_signal_pressure / 5)))
+
+    findings: list[dict[str, Any]] = []
+    if auth_signal_strength == 0:
+        findings.append(
+            {
+                "category": "security",
+                "finding": "Authentication/authorization enforcement signals are sparse in scanned source files",
+                "evidence": [pattern_evidence],
+                "risk": "Access-control behavior may be concentrated in external layers or undocumented flows",
+                "recommendation": "Document and centralize authn/authz controls, and enforce policy checks at service boundaries",
+                "confidence": 0.52,
+            }
+        )
+    if anti_counts["insecure_http"] > 0:
+        findings.append(
+            {
+                "category": "security",
+                "finding": "Insecure HTTP references were detected",
+                "evidence": [pattern_evidence],
+                "risk": "Sensitive traffic may be exposed if these references are runtime reachable",
+                "recommendation": "Enforce TLS-only endpoints and block plaintext protocol usage in CI",
+                "confidence": 0.76,
+            }
+        )
+    if anti_counts["weak_crypto"] > 0:
+        findings.append(
+            {
+                "category": "security",
+                "finding": "Weak cryptographic primitive references (MD5/SHA1) were detected",
+                "evidence": [pattern_evidence],
+                "risk": "Potential cryptographic integrity/strength weaknesses in security-sensitive paths",
+                "recommendation": "Migrate to modern approved primitives and validate by crypto linting",
+                "confidence": 0.79,
+            }
+        )
+    if anti_counts["todo_fixme_hack"] > 100:
+        findings.append(
+            {
+                "category": "code_health",
+                "finding": "High TODO/FIXME/HACK density suggests unresolved engineering debt",
+                "evidence": [pattern_evidence],
+                "risk": "Deferred defects and inconsistent implementation quality increase delivery risk",
+                "recommendation": "Track backlog debt explicitly and age-limit TODO/HACK items in critical modules",
+                "confidence": 0.68,
+            }
+        )
+
+    narrative = (
+        f"Code-pattern scan covered {scanned} source files and found auth signal count={auth_signal_strength} "
+        f"and anti-pattern signal count={anti_signal_pressure}. Auth posture score={auth_posture_score}/100, "
+        f"anti-pattern pressure score={anti_pattern_pressure_score}/100."
+    )
+
+    return {
+        "scanned_source_files": scanned,
+        "auth_signals": dict(auth_counts),
+        "anti_pattern_signals": dict(anti_counts),
+        "auth_hit_files": {k: sample_values(v, 10) for k, v in auth_hit_files.items()},
+        "anti_hit_files": {k: sample_values(v, 10) for k, v in anti_hit_files.items()},
+        "auth_posture_score": auth_posture_score,
+        "anti_pattern_pressure_score": anti_pattern_pressure_score,
+        "narrative": narrative,
+        "findings": findings,
+        "evidence": [pattern_evidence],
+    }
+
+
+def findings_to_narrative_lines(findings: list[dict[str, Any]], limit: int = 4) -> list[str]:
+    lines: list[str] = []
+    for finding in findings[:limit]:
+        lines.append(
+            f"Finding: {finding.get('finding', '')}. Risk: {finding.get('risk', '')}. "
+            f"Action: {finding.get('recommendation', '')}."
+        )
+    return lines
+
+
 def build_risk(
     risk_id: str,
     title: str,
@@ -1151,9 +1468,11 @@ def render_pdf_report(
         staleness_metrics = metrics.get("staleness_and_velocity", [])
         dep_metrics = metrics.get("dependencies_and_supply_chain", [])
         security_metrics = metrics.get("security_and_compliance", [])
+        operability_metrics = metrics.get("operability", [])
+        infra_metrics = metrics.get("infrastructure", [])
 
         rows = [["Metric", "Value", "Confidence"]]
-        for bucket in (staleness_metrics, dep_metrics, security_metrics):
+        for bucket in (staleness_metrics, dep_metrics, security_metrics, operability_metrics, infra_metrics):
             for item in bucket[:8]:
                 rows.append([
                     item.get("metric_id", "unknown"),
@@ -1177,6 +1496,42 @@ def render_pdf_report(
         for section in report.get("sections", []):
             story.append(Paragraph(section.get("title", "Section"), styles["Heading2"]))
             story.append(Paragraph(section.get("summary", ""), styles["BodyText"]))
+            for line in section.get("narrative_lines", [])[:8]:
+                story.append(Paragraph(f"- {line}", styles["BodyText"]))
+
+            for item in section.get("findings", [])[:8]:
+                story.append(Paragraph(f"Finding: {item.get('finding', '')}", styles["BodyText"]))
+                story.append(Paragraph(f"Evidence: {', '.join(item.get('evidence', []))}", styles["BodyText"]))
+                story.append(Paragraph(f"Risk: {item.get('risk', '')}", styles["BodyText"]))
+                story.append(Paragraph(f"Recommended action: {item.get('recommendation', '')}", styles["BodyText"]))
+                story.append(
+                    Paragraph(
+                        f"Confidence: {float(item.get('confidence', 0) or 0):.2f}",
+                        styles["Italic"],
+                    )
+                )
+                story.append(Spacer(1, 4))
+
+            for action in section.get("actions", [])[:10]:
+                story.append(Paragraph(f"- {action}", styles["BodyText"]))
+
+            infra = section.get("infrastructure_overview")
+            if isinstance(infra, dict):
+                story.append(
+                    Paragraph(
+                        f"Infrastructure maturity: {infra.get('infra_maturity_score', 'n/a')}/100",
+                        styles["BodyText"],
+                    )
+                )
+                story.append(Paragraph(infra.get("narrative", ""), styles["BodyText"]))
+                for runtime_line in infra.get("inferred_runtime_model", [])[:6]:
+                    story.append(Paragraph(f"- {runtime_line}", styles["BodyText"]))
+
+            for phase in section.get("roadmap", [])[:6]:
+                story.append(Paragraph(f"{phase.get('window', 'Window')}:", styles["BodyText"]))
+                for focus in phase.get("focus", [])[:6]:
+                    story.append(Paragraph(f"- {focus}", styles["BodyText"]))
+
             story.append(
                 Paragraph(f"Confidence: {section.get('confidence', 0):.2f}", styles["Italic"])
             )
@@ -1195,8 +1550,21 @@ def render_pdf_report(
             f"- Repository: `{report['repo']['path']}`",
             f"- Generated: `{report['generated_at']}`",
             "",
-            "## Top Risks",
+            "## Executive Narrative",
         ]
+        for section in report.get("sections", []):
+            markdown_lines.append(f"### {section.get('title', 'Section')}")
+            markdown_lines.append(section.get("summary", ""))
+            for line in section.get("narrative_lines", [])[:8]:
+                markdown_lines.append(f"- {line}")
+            for finding in section.get("findings", [])[:6]:
+                markdown_lines.append(f"- Finding: {finding.get('finding', '')}")
+                markdown_lines.append(f"  - Risk: {finding.get('risk', '')}")
+                markdown_lines.append(f"  - Action: {finding.get('recommendation', '')}")
+            markdown_lines.append("")
+        markdown_lines.extend([
+            "## Top Risks",
+        ])
         for risk in sorted(risk_matrix, key=lambda r: r["priority_score"], reverse=True)[:20]:
             markdown_lines.append(
                 f"- **{risk['risk_id']}** {risk['title']} (impact={risk['impact']}, likelihood={risk['likelihood']}, effort={risk['effort']}, confidence={risk['confidence']:.2f})"
@@ -1434,6 +1802,17 @@ def main() -> int:
     ]
     test_ratio = (len(test_files) / len(source_files)) if source_files else 0.0
     devops_signals = detect_devops_signals(repo_path, tracked_files)
+    infrastructure_analysis = analyze_infrastructure_landscape(
+        repo_path=repo_path,
+        tracked_files=tracked_files,
+        devops_signals=devops_signals,
+        evidence=evidence,
+    )
+    code_pattern_analysis = analyze_code_pattern_signals(
+        repo_path=repo_path,
+        source_files=source_files,
+        evidence=evidence,
+    )
 
     code_health_findings: list[dict[str, Any]] = []
     if test_ratio < 0.1:
@@ -1456,6 +1835,9 @@ def main() -> int:
                 "confidence": 0.8,
             }
         )
+    for finding in code_pattern_analysis["findings"]:
+        if finding.get("category") == "code_health":
+            code_health_findings.append(finding)
 
     hotspots = sorted(
         (
@@ -1497,6 +1879,7 @@ def main() -> int:
     ]
 
     devops_findings: list[dict[str, Any]] = []
+    devops_findings.extend(infrastructure_analysis["findings"])
     if not devops_signals["observability"]:
         devops_findings.append(
             {
@@ -1523,7 +1906,9 @@ def main() -> int:
     for key in ["github_actions", "gitlab_ci", "jenkins", "docker", "kubernetes", "terraform", "helm", "observability", "backup_signal"]:
         if devops_signals.get(key):
             operability_score += 6
-    operability_score = int(clamp_score(operability_score))
+    operability_score = int(
+        clamp_score(0.6 * operability_score + 0.4 * infrastructure_analysis["infra_maturity_score"])
+    )
 
     operability_metrics = [
         {
@@ -1547,9 +1932,35 @@ def main() -> int:
             "confidence": 0.6,
             "evidence": [evidence_velocity],
         },
+        {
+            "metric_id": "infra_maturity_score",
+            "value": infrastructure_analysis["infra_maturity_score"],
+            "method": "infrastructure artifact discovery across deployment/runtime/IaC signals",
+            "confidence": 0.7,
+            "evidence": infrastructure_analysis["evidence"],
+        },
+    ]
+    code_pattern_metrics = [
+        {
+            "metric_id": "auth_posture_score",
+            "value": code_pattern_analysis["auth_posture_score"],
+            "method": "regex-based auth/authz signal strength over source files",
+            "confidence": 0.59,
+            "evidence": code_pattern_analysis["evidence"],
+        },
+        {
+            "metric_id": "anti_pattern_pressure_score",
+            "value": code_pattern_analysis["anti_pattern_pressure_score"],
+            "method": "inverse pressure score from TODO/FIXME/insecure patterns",
+            "confidence": 0.64,
+            "evidence": code_pattern_analysis["evidence"],
+        },
     ]
 
     security_findings: list[dict[str, Any]] = []
+    security_findings.extend(
+        [finding for finding in code_pattern_analysis["findings"] if finding.get("category") == "security"]
+    )
     secret_scan_findings: list[dict[str, Any]] = []
     secret_metrics: list[dict[str, Any]] = []
 
@@ -1616,6 +2027,7 @@ def main() -> int:
                         "confidence": 0.55,
                     }
                 )
+    security_findings.extend(compliance_gaps)
 
     data_findings: list[dict[str, Any]] = []
     data_risks: list[dict[str, Any]] = []
@@ -1679,10 +2091,17 @@ def main() -> int:
         controls_score = secret_metrics[1]["value"]["score"]
         secrets_hygiene_score = int(controls_score)
 
-    access_control_model = 55
+    access_control_model = int(
+        clamp_score(0.6 * code_pattern_analysis["auth_posture_score"] + 0.4 * 55)
+    )
     dependency_supply_chain = freshness_score
     cicd_devsecops = int(clamp_score((operability_score + (20 if devops_signals["github_actions"] else 0)) / 1.2))
-    infrastructure_cloud = int(clamp_score(35 + 12 * sum(1 for k in ["docker", "kubernetes", "terraform", "helm"] if devops_signals[k])))
+    infrastructure_cloud = int(
+        clamp_score(
+            0.5 * infrastructure_analysis["infra_maturity_score"]
+            + 0.5 * (35 + 12 * sum(1 for k in ["docker", "kubernetes", "terraform", "helm"] if devops_signals[k]))
+        )
+    )
     data_protection_encryption = 45 + (10 if has_migrations else 0)
     observability_audit = 35 + (30 if devops_signals["observability"] else 0)
     incident_response_recovery = 30 + (40 if has_backups else 0)
@@ -1813,6 +2232,51 @@ def main() -> int:
             ],
         )
 
+    if infrastructure_analysis["infra_maturity_score"] < 45:
+        add_risk(
+            title="Infrastructure codification and deployment evidence is weak",
+            category="infrastructure",
+            impact=4,
+            likelihood=4,
+            effort=3,
+            confidence=0.74,
+            evidence_ids=infrastructure_analysis["evidence"],
+            actions=[
+                "Codify deployment topology and baseline infrastructure as code",
+                "Version operational runbooks with environment-specific controls",
+            ],
+        )
+
+    if code_pattern_analysis["auth_posture_score"] < 50:
+        add_risk(
+            title="Authentication and authorization pattern coverage is weak",
+            category="security",
+            impact=4,
+            likelihood=3,
+            effort=3,
+            confidence=0.63,
+            evidence_ids=code_pattern_analysis["evidence"],
+            actions=[
+                "Centralize authn/authz middleware and document enforcement points",
+                "Add authorization policy tests for sensitive routes and handlers",
+            ],
+        )
+
+    if code_pattern_analysis["anti_pattern_pressure_score"] < 55:
+        add_risk(
+            title="Code anti-pattern pressure indicates latent maintainability debt",
+            category="code_health",
+            impact=3,
+            likelihood=4,
+            effort=2,
+            confidence=0.67,
+            evidence_ids=code_pattern_analysis["evidence"],
+            actions=[
+                "Reduce TODO/FIXME/HACK density in critical paths",
+                "Add static quality gates for weak crypto and insecure transport references",
+            ],
+        )
+
     secrets_count = 0
     if secret_metrics:
         secrets_count = secret_metrics[0]["value"].get("findings_count", 0)
@@ -1876,8 +2340,17 @@ def main() -> int:
         },
         "staleness_and_velocity": staleness_metrics,
         "dependencies_and_supply_chain": dependency_metrics,
-        "security_and_compliance": secret_metrics,
+        "security_and_compliance": secret_metrics + code_pattern_metrics,
         "operability": operability_metrics,
+        "infrastructure": [
+            {
+                "metric_id": "inferred_runtime_model",
+                "value": infrastructure_analysis["inferred_runtime_model"],
+                "method": "static analysis of deployment/runtime artifacts",
+                "confidence": 0.66,
+                "evidence": infrastructure_analysis["evidence"],
+            }
+        ],
         "hotspots": hotspots,
     }
 
@@ -1927,15 +2400,126 @@ def main() -> int:
         ]
 
     summary_lines = [
-        f"Final TDD score: {final_score:.2f} (base={base_tdd_score:.2f}, adjusted risk={adjusted_tdd_risk:.2f}).",
-        f"SMI score: {smi_score:.2f} ({tier_code} - {tier_label}).",
-        f"Stale code ratio: {stale_ratio:.2%}; bus factor proxy: {bus_factor}.",
-        f"Dependency freshness score: {freshness_score}.",
-        f"Git history secret findings: {secrets_count}.",
+        (
+            f"This assessment evaluates repository sustainability, delivery posture, and security readiness. "
+            f"Final TDD score is {final_score:.2f} (base score {base_tdd_score:.2f}, adjusted risk {adjusted_tdd_risk:.2f})."
+        ),
+        (
+            f"Security maturity is {smi_score:.2f} ({tier_code} - {tier_label}) with a risk multiplier of {security_multiplier:.2f}. "
+            f"Git-history secret findings total {secrets_count}."
+        ),
+        (
+            f"Staleness profile shows median last-touch age of {median_age_days:.1f} days and stale code ratio of {stale_ratio:.2%}. "
+            f"Change concentration gini is {gini_val:.2f} and bus-factor proxy is {bus_factor}."
+        ),
+        (
+            f"Dependency freshness score is {freshness_score}/100 with cadence of {dep_cadence} dependency-touching commits over 90 days. "
+            f"Infrastructure maturity is {infrastructure_analysis['infra_maturity_score']}/100."
+        ),
     ]
 
     if tier_code in {"D", "F"}:
-        summary_lines.append("Security liability signal present due to low SMI tier.")
+        summary_lines.append(
+            "Security liability signal is present because SMI tier is in structural-risk range and materially elevates overall due-diligence risk."
+        )
+
+    architecture_summary = (
+        f"The codebase is organized into {len(component_inventory)} top-level components across {len(languages)} language groups. "
+        f"Primary language distribution is {languages}. External dependency ecosystems detected: "
+        f"{architecture_overview['external_dependency_ecosystems']}."
+    )
+    code_health_summary = (
+        f"Code health assessment indicates test-file ratio of {test_ratio:.2%} and CI presence={ci_present}. "
+        f"Anti-pattern pressure score is {code_pattern_analysis['anti_pattern_pressure_score']}/100."
+    )
+    staleness_summary = (
+        f"Staleness and velocity metrics indicate median last-touch age of {median_age_days:.1f} days and stale-code ratio of {stale_ratio:.2%}. "
+        f"Hotspot concentration (gini={gini_val:.2f}) suggests change risk concentration in a narrow file set."
+    )
+    dependency_summary = (
+        f"Dependency posture is moderate-to-weak with freshness score {freshness_score}/100. "
+        f"Observed update cadence is {dep_cadence} manifest-touching commits in 90 days."
+    )
+    devops_summary = (
+        f"Operability score is {operability_score}/100 and inferred infrastructure maturity is "
+        f"{infrastructure_analysis['infra_maturity_score']}/100. {infrastructure_analysis['narrative']}"
+    )
+    security_summary = (
+        f"Security controls include SMI score {smi_score:.2f} ({tier_code}), secrets-hygiene score {secrets_hygiene_score}, "
+        f"and auth-posture score {code_pattern_analysis['auth_posture_score']}/100."
+    )
+    data_summary = (
+        f"Data-layer review detected migration signal={has_migrations} and backup/restore signal={has_backups}. "
+        f"Findings focus on migration discipline, data recovery readiness, and integrity safeguards."
+    )
+    team_summary = (
+        f"Team/process analysis shows bus-factor proxy of {bus_factor} across {len(per_author_loc)} contributors in timeframe. "
+        f"Ownership concentration signals are used as a proxy for maintainability and continuity risk."
+    )
+
+    sub_agent_outputs = [
+        {
+            "agent_id": "repo_cartographer",
+            "role": "Architecture & System Mapping",
+            "summary": architecture_summary,
+            "finding_count": 0,
+            "evidence": [evidence_staleness],
+        },
+        {
+            "agent_id": "code_health_auditor",
+            "role": "Code Quality and Anti-Pattern Detection",
+            "summary": code_health_summary,
+            "finding_count": len(code_health_findings),
+            "evidence": code_pattern_analysis["evidence"],
+        },
+        {
+            "agent_id": "staleness_analyst",
+            "role": "Staleness and Velocity",
+            "summary": staleness_summary,
+            "finding_count": 1 if stale_ratio > 0.6 else 0,
+            "evidence": [evidence_staleness, evidence_velocity],
+        },
+        {
+            "agent_id": "dependency_auditor",
+            "role": "Dependency and Supply Chain",
+            "summary": dependency_summary,
+            "finding_count": len(dependency_risks),
+            "evidence": [evidence_deps],
+        },
+        {
+            "agent_id": "infra_devops_reviewer",
+            "role": "Infrastructure and Operability",
+            "summary": devops_summary,
+            "finding_count": len(devops_findings),
+            "evidence": infrastructure_analysis["evidence"],
+        },
+        {
+            "agent_id": "security_compliance",
+            "role": "Security and Compliance",
+            "summary": security_summary,
+            "finding_count": len(security_findings),
+            "evidence": list(
+                dict.fromkeys(
+                    [e for item in security_findings for e in item.get("evidence", [])]
+                    + code_pattern_analysis["evidence"]
+                )
+            ),
+        },
+        {
+            "agent_id": "data_layer_reviewer",
+            "role": "Data Layer and Integrity",
+            "summary": data_summary,
+            "finding_count": len(data_findings) + len(data_risks),
+            "evidence": [evidence_velocity],
+        },
+        {
+            "agent_id": "team_process_inferencer",
+            "role": "Team and Process Signals",
+            "summary": team_summary,
+            "finding_count": len(process_findings) + len(bus_factor_risks),
+            "evidence": [evidence_velocity],
+        },
+    ]
 
     tdd_report_json = {
         "generated_at": generated_at,
@@ -1951,43 +2535,61 @@ def main() -> int:
             "adjusted_tdd_risk": adjusted_tdd_risk,
             "final_score": final_score,
         },
+        "sub_agent_outputs": sub_agent_outputs,
         "sections": [
             {
                 "title": "Executive Summary",
                 "summary": " ".join(summary_lines),
-                "confidence": 0.76,
+                "confidence": 0.78,
                 "limitations": section_limitations,
+                "narrative_lines": summary_lines,
             },
             {
                 "title": "Architecture Overview",
-                "summary": f"Detected {len(component_inventory)} top-level components across {len(languages)} language groups.",
-                "confidence": 0.7,
+                "summary": architecture_summary,
+                "confidence": 0.72,
                 "details": architecture_overview,
+                "component_inventory": component_inventory,
+                "dataflow_notes": dataflow_notes,
             },
             {
                 "title": "Codebase Health",
-                "summary": f"Test file ratio={test_ratio:.2%}; CI present={ci_present}.",
-                "confidence": 0.71,
+                "summary": code_health_summary,
+                "confidence": 0.74,
                 "findings": code_health_findings,
+                "narrative_lines": findings_to_narrative_lines(code_health_findings, 5),
+                "pattern_signals": {
+                    "anti_pattern_signals": code_pattern_analysis["anti_pattern_signals"],
+                    "anti_hit_files": code_pattern_analysis["anti_hit_files"],
+                    "anti_pattern_pressure_score": code_pattern_analysis["anti_pattern_pressure_score"],
+                },
             },
             {
                 "title": "Staleness & Change Velocity",
-                "summary": f"Median last-touch age={median_age_days:.1f} days; stale ratio={stale_ratio:.2%}; change concentration gini={gini_val:.2f}.",
-                "confidence": 0.82,
+                "summary": staleness_summary,
+                "confidence": 0.83,
                 "hotspots": hotspots,
+                "narrative_lines": [
+                    f"Median file last-touch age is {median_age_days:.1f} days.",
+                    f"Stale code ratio is {stale_ratio:.2%}.",
+                    f"Change concentration gini is {gini_val:.2f}; bus factor proxy is {bus_factor}.",
+                ],
             },
             {
                 "title": "Dependencies & Supply Chain",
-                "summary": f"Dependency freshness score={freshness_score}; update cadence (90d)={dep_cadence}.",
-                "confidence": 0.66,
+                "summary": dependency_summary,
+                "confidence": 0.69,
                 "inventory": dependency_inventory,
                 "risks": dependency_risks,
+                "narrative_lines": findings_to_narrative_lines(dependency_risks, 4),
             },
             {
                 "title": "DevOps & Operability",
-                "summary": f"Operability score={operability_score}; observability signal={devops_signals['observability']}.",
-                "confidence": 0.64,
+                "summary": devops_summary,
+                "confidence": 0.7,
                 "findings": devops_findings,
+                "narrative_lines": findings_to_narrative_lines(devops_findings, 6),
+                "infrastructure_overview": infrastructure_analysis,
             },
             {
                 "title": "Security Maturity Index",
@@ -1997,24 +2599,32 @@ def main() -> int:
             },
             {
                 "title": "Security Findings (incl. Git History Secrets)",
-                "summary": f"Secret findings (history)={secrets_count}; controls score={secrets_hygiene_score}.",
-                "confidence": 0.74,
+                "summary": security_summary,
+                "confidence": 0.78,
                 "findings": security_findings,
+                "narrative_lines": findings_to_narrative_lines(security_findings, 6),
                 "secret_scan_findings": secret_scan_findings,
+                "auth_and_security_signals": {
+                    "auth_signals": code_pattern_analysis["auth_signals"],
+                    "auth_hit_files": code_pattern_analysis["auth_hit_files"],
+                    "auth_posture_score": code_pattern_analysis["auth_posture_score"],
+                },
             },
             {
                 "title": "Data Layer & Integrity",
-                "summary": f"Migration signals present={has_migrations}; backup signals present={has_backups}.",
-                "confidence": 0.58,
+                "summary": data_summary,
+                "confidence": 0.6,
                 "findings": data_findings,
                 "risks": data_risks,
+                "narrative_lines": findings_to_narrative_lines(data_findings + data_risks, 4),
             },
             {
                 "title": "Team/Process Signals",
-                "summary": f"Bus factor proxy={bus_factor}; contributors in timeframe={len(per_author_loc)}.",
-                "confidence": 0.73,
+                "summary": team_summary,
+                "confidence": 0.74,
                 "findings": process_findings,
                 "bus_factor_risks": bus_factor_risks,
+                "narrative_lines": findings_to_narrative_lines(process_findings + bus_factor_risks, 4),
             },
             {
                 "title": "Slack Signals (if enabled)",
@@ -2025,24 +2635,26 @@ def main() -> int:
             {
                 "title": "Risk Matrix",
                 "summary": f"{len(risk_matrix)} risks ranked by priority score.",
-                "confidence": 0.8,
+                "confidence": 0.82,
+                "top_risks": risk_matrix[:20],
             },
             {
                 "title": "Recommendations",
-                "summary": "Top recommended actions prioritized by risk.",
-                "confidence": 0.77,
+                "summary": "Top recommended actions prioritized by risk impact and feasibility.",
+                "confidence": 0.79,
                 "actions": recommendations,
             },
             {
                 "title": "12-18 Month Remediation Roadmap",
                 "summary": "Phased roadmap for risk reduction and maturity gains." if args.include_roadmap else "Roadmap disabled.",
-                "confidence": 0.69,
+                "confidence": 0.71,
                 "roadmap": roadmap,
             },
             {
                 "title": "Evidence Appendix",
                 "summary": f"{len(evidence.entries)} reproducibility pointers recorded.",
                 "confidence": 0.9,
+                "sub_agent_outputs": sub_agent_outputs,
             },
         ],
     }

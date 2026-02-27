@@ -5,13 +5,16 @@ description: Evidence-first technical due diligence for software repositories. U
 
 # CodeAtlas
 
-Run a technical due diligence pass that is metrics-heavy, reproducible, and privacy-safe. Prioritize codebase staleness, dependency freshness, secret exposure in git history, and SMI-driven risk adjustment.
+Run a technical due diligence pass that is metrics-heavy, reproducible, and privacy-safe. Prioritize codebase staleness, dependency freshness, secret exposure in git history, and SMI-driven risk adjustment. Support both single-repository and portfolio-root (many repositories under one folder) flows.
+
+The orchestrator must use specialized sub-agents (implemented as focused analyzers) and synthesize their outputs into a human-readable report, not only raw metrics.
 
 ## Use This Skill
 
 Use this skill when the request includes one or more of these intents:
 
 - Run technical due diligence or readiness scoring on a codebase.
+- Run technical due diligence on a portfolio root containing many repositories.
 - Produce a machine-readable risk matrix with evidence pointers.
 - Scan the working tree and git history for leaked secrets.
 - Classify discovered secrets as `prod_like`, `test_like`, or `unknown`.
@@ -62,6 +65,16 @@ Execute this sequence:
 11. Compute SMI, tier, and security multiplier.
 12. Synthesize JSON artifacts and render PDF.
 
+Sub-agent responsibilities to orchestrate:
+- `repo_cartographer`: architecture boundaries, component map, dataflow notes.
+- `code_health_auditor`: test posture, anti-pattern pressure, maintainability risks.
+- `staleness_analyst`: stale ratios, ownership concentration, hotspots.
+- `dependency_auditor`: freshness/cadence and supply-chain concerns.
+- `infra_devops_reviewer`: deployment artifacts, IaC posture, operability maturity.
+- `security_compliance`: secret exposure, auth/security patterns, compliance gaps.
+- `data_layer_reviewer`: migration and backup/restore evidence.
+- `team_process_inferencer`: bus factor and process maturity signals.
+
 For every finding, emit:
 1. Finding
 2. Evidence
@@ -71,11 +84,25 @@ For every finding, emit:
 
 ## Command
 
-Run the orchestrator script from the skill directory:
+Run the orchestrator script from the skill directory.
+
+Single repository:
 
 ```bash
 python3 scripts/run_codeatlas.py \
   --repo /absolute/path/to/repo \
+  --out /absolute/path/to/output \
+  --timeframe-days 180 \
+  --stale-days 365 \
+  --risk-appetite medium \
+  --report-format both
+```
+
+Portfolio root (many repositories):
+
+```bash
+python3 scripts/run_codeatlas_portfolio.py \
+  --portfolio-root /absolute/path/to/root-with-many-repos \
   --out /absolute/path/to/output \
   --timeframe-days 180 \
   --stale-days 365 \
@@ -91,6 +118,9 @@ Generated outputs:
 - `evidence_index_json`
 - `slack_intel_json` (optional)
 - `tdd_report_pdf` (when PDF engine available)
+- Portfolio flow emits `combined_*` artifacts and a human-readable `combined_tdd_report.pdf`.
+- Portfolio flow defaults to `--require-pdf`, so PDF generation failure is treated as a run failure.
+- Single-repo and portfolio reports should include narrative prose and explicit `Finding/Evidence/Risk/Action/Confidence` entries per section.
 
 ## Scoring Rules
 
