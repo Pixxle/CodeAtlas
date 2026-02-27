@@ -1,0 +1,4 @@
+interface:
+  display_name: "CodeAtlas"
+  short_description: "Evidence-first technical due diligence and risk scoring"
+  default_prompt: "Run a full technical due diligence assessment for this repository. Emphasize staleness, dependency freshness, git-history secret exposure classification, Security Maturity Index scoring, and generate JSON artifacts plus an executive PDF."

@@ -1,0 +1,235 @@
+{
+  "version": "1.2",
+  "name": "CodeAtlas",
+  "type": "agent_skill",
+  "description": "CodeAtlas performs technical due diligence by orchestrating evidence-driven checks that emphasize codebase staleness, dependency freshness, git-history secret exposure classification, and Security Maturity Index scoring.",
+  "interfaces": {
+    "required_capabilities": [
+      "repo_read_access",
+      "git_history_access"
+    ],
+    "optional_capabilities": [
+      "shell_exec",
+      "network_access",
+      "ci_logs_access",
+      "ticketing_access",
+      "cloud_access_readonly",
+      "slack_history_access"
+    ],
+    "inputs": {
+      "repo": {
+        "required": true,
+        "description": "Repository root path or URL"
+      },
+      "timeframe_days": {
+        "type": "integer",
+        "default": 180
+      },
+      "stale_days": {
+        "type": "integer",
+        "default": 365
+      },
+      "risk_appetite": {
+        "type": "string",
+        "enum": ["low", "medium", "high"],
+        "default": "medium"
+      },
+      "target_scale_multiplier": {
+        "type": "integer",
+        "default": 5
+      },
+      "compliance_targets": {
+        "type": "array",
+        "default": [],
+        "items": ["GDPR", "SOC2", "ISO27001", "HIPAA", "PCI"]
+      },
+      "report_format": {
+        "type": "string",
+        "enum": ["pdf", "json", "both"],
+        "default": "both"
+      },
+      "include_roadmap": {
+        "type": "boolean",
+        "default": true
+      },
+      "privacy_mode": {
+        "type": "boolean",
+        "default": true
+      },
+      "slack": {
+        "enabled": false,
+        "lookback_days": 180
+      },
+      "secret_scan": {
+        "enabled": true,
+        "scan_git_history": true,
+        "scan_working_tree": true,
+        "classify_test_vs_prod": true,
+        "history_depth": "all",
+        "max_findings": 200
+      }
+    }
+  },
+  "outputs": {
+    "artifacts": [
+      "tdd_report_pdf",
+      "tdd_report_json",
+      "risk_matrix_json",
+      "metrics_summary_json",
+      "security_maturity_index_json",
+      "evidence_index_json",
+      "slack_intel_json"
+    ]
+  },
+  "workflow": {
+    "id": "codeatlas_tdd",
+    "steps": [
+      "detect_stack_and_mode",
+      "map_architecture",
+      "assess_code_health",
+      "compute_staleness_and_velocity",
+      "inventory_and_score_dependencies",
+      "assess_devops",
+      "assess_security_compliance",
+      "assess_data_layer",
+      "infer_team_process",
+      "summarize_slack_history_if_enabled",
+      "compute_security_maturity_index",
+      "synthesize_report_and_scores",
+      "render_pdf_from_json"
+    ]
+  },
+  "reporting": {
+    "report_sections": [
+      "Executive Summary",
+      "Overall Score & Risk",
+      "Architecture Overview",
+      "Codebase Health",
+      "Staleness & Change Velocity",
+      "Dependencies & Supply Chain",
+      "DevOps & Operability",
+      "Security Maturity Index",
+      "Security Findings (incl. Git History Secrets)",
+      "Data Layer & Integrity",
+      "Team/Process Signals",
+      "Slack Signals (if enabled)",
+      "Risk Matrix",
+      "Recommendations",
+      "12-18 Month Remediation Roadmap",
+      "Evidence Appendix"
+    ],
+    "risk_matrix_schema": [
+      "risk_id",
+      "title",
+      "category",
+      "impact",
+      "likelihood",
+      "effort",
+      "priority_score",
+      "confidence",
+      "evidence",
+      "recommended_actions"
+    ]
+  },
+  "metrics": {
+    "staleness_and_velocity": [
+      "median_file_last_touch_days",
+      "stale_code_ratio",
+      "churn_loc_timeframe",
+      "change_concentration_gini",
+      "bus_factor_proxy",
+      "orphaned_code_ratio"
+    ],
+    "dependencies_and_supply_chain": [
+      "dependency_freshness_score",
+      "known_vuln_count",
+      "dependency_update_cadence"
+    ],
+    "security_and_compliance": [
+      "git_history_secrets_exposure",
+      "secrets_hygiene_controls"
+    ]
+  },
+  "security_maturity_index": {
+    "scale": "0-100",
+    "weights": {
+      "secrets_hygiene": 0.2,
+      "access_control_model": 0.15,
+      "dependency_supply_chain": 0.15,
+      "cicd_devsecops": 0.15,
+      "infrastructure_cloud": 0.1,
+      "data_protection_encryption": 0.1,
+      "observability_audit": 0.1,
+      "incident_response_recovery": 0.05
+    },
+    "tiering": {
+      "A": { "min": 85, "max": 100, "label": "Enterprise-ready" },
+      "B": { "min": 70, "max": 84, "label": "Mature startup" },
+      "C": { "min": 50, "max": 69, "label": "Typical startup risk" },
+      "D": { "min": 30, "max": 49, "label": "Structural risk" },
+      "F": { "min": 0, "max": 29, "label": "Security liability" }
+    },
+    "tdd_risk_multiplier": [
+      { "if": "smi >= 85", "multiplier": 0.8 },
+      { "if": "smi >= 70 && smi < 85", "multiplier": 1.0 },
+      { "if": "smi >= 50 && smi < 70", "multiplier": 1.2 },
+      { "if": "smi >= 30 && smi < 50", "multiplier": 1.5 },
+      { "if": "smi < 30", "multiplier": 2.0 }
+    ]
+  },
+  "secret_classification": {
+    "classes": ["prod_like", "test_like", "unknown"],
+    "decision_rules": [
+      "if any prod_like_signals AND not test_like_signals => prod_like",
+      "if test_like_signals AND no strong prod_like_signals => test_like",
+      "else => unknown"
+    ]
+  },
+  "scoring": {
+    "overall_tdd_score": {
+      "scale": "0-100",
+      "pillars": {
+        "architecture": 0.2,
+        "code_health": 0.15,
+        "staleness_velocity": 0.25,
+        "dependencies": 0.15,
+        "devops_operability": 0.15,
+        "security_smi": 0.1
+      },
+      "rules": [
+        "Compute base_tdd_score from pillars (0-100)",
+        "Compute base_tdd_risk as 100 - base_tdd_score",
+        "Apply security_multiplier from SMI to base_tdd_risk",
+        "Map adjusted risk back into final score"
+      ]
+    }
+  },
+  "synthesis_rules": [
+    "If stale_code_ratio is high AND bus_factor_proxy <= 2, elevate organizational sustainability risk",
+    "If dependency_freshness_score is low AND dependency_update_cadence is low, elevate supply-chain risk",
+    "If CI/CD is weak and rollback absent, elevate operational risk",
+    "If git_history_secrets_exposure.findings_count >= 1, create High/Critical security risk",
+    "If SMI tier is D or F, elevate overall TDD risk and annotate security liability"
+  ],
+  "privacy_and_safety": [
+    "If privacy_mode=true: redact contributor identities and output aggregates",
+    "Do not output any secret material; store only redacted indicators",
+    "If secrets are detected, advise immediate rotation and incident handling",
+    "Slack output must be anonymized and non-verbatim",
+    "No exploitation or dynamic offensive testing"
+  ],
+  "acceptance_criteria": [
+    "Compute staleness metrics with evidence",
+    "Compute dependency freshness metrics",
+    "Scan git history for secrets and classify test-like vs prod-like",
+    "Compute SMI score/tier and risk multiplier",
+    "Produce ranked risk matrix with evidence pointers",
+    "Produce final PDF report covering all required sections",
+    "Label reduced confidence when operating_mode != full"
+  ],
+  "non_goals": [
+    "No code changes or PR creation",
+    "No dynamic penetration testing",
+    "No disclosure of proprietary code, secrets, or verbatim Slack content"
+  ]
+}
