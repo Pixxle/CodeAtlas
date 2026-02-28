@@ -17,7 +17,10 @@ env/
 .vscode/
 .idea/
 
-# Local run artifacts
+# Analysis output
+codeatlas-output/
+
+# Legacy output dirs
 .tmp-codeatlas-out/
 out/
 reports/
