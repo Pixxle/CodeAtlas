@@ -9,6 +9,10 @@ Sub-agents: navigate to your assigned dimension and follow its instructions.
 
 1. [Architecture & Design](#1-architecture--design)
 2. [Code Quality & Standards](#2-code-quality--standards)
+   - 2a. [Style & Consistency](#2a-style--consistency-code-style)
+   - 2b. [Complexity & Structure](#2b-complexity--structure-code-complexity)
+   - 2c. [Anti-Patterns & Tech Debt](#2c-anti-patterns--tech-debt-code-debt)
+   - 2d. [Error Handling & Resilience](#2d-error-handling--resilience-code-error-handling)
 3. [Dependency & Supply Chain](#3-dependency--supply-chain)
 4. [Security Posture](#4-security-posture)
 5. [Testing & Quality Assurance](#5-testing--quality-assurance)
@@ -67,45 +71,196 @@ find . -type d -name "shared" -o -name "common" -o -name "utils" -o -name "lib" 
 
 **Goal**: Assess code readability, maintainability, and adherence to established patterns.
 
-### What to investigate
+This dimension is split into four focused sub-dimensions. Each sub-agent should investigate its assigned area thoroughly and save its findings to `codeatlas-output/analysis/[REPO_NAME]/code-quality/[SUB_SLUG].md`.
 
-- **Consistency**: Is there a unified coding style? Look for linter configs (`.eslintrc`, `.flake8`, `pyproject.toml [tool.ruff]`, `.prettierrc`, etc.).
-- **Complexity**: Identify overly complex functions. Functions over 50 lines, deeply nested conditionals, high cyclomatic complexity.
-- **Anti-patterns**: Dead code, commented-out code blocks, copy-paste duplication, magic numbers/strings, overly broad exception handling.
-- **Type safety**: For dynamically typed languages, is there type annotation usage (Python type hints, TypeScript strict mode, JSDoc)?
-- **Error handling**: How are errors propagated? Are there catch-all handlers that swallow errors? Is there structured error reporting?
-- **Naming conventions**: Are names descriptive? Consistent casing? Do variable names communicate intent?
+---
 
-### Commands to run
+### 2a. Style & Consistency (`code-style`)
+
+**Goal**: Assess whether the codebase follows a unified, enforced coding style.
+
+#### What to investigate
+
+- **Linter & formatter configs**: Look for `.eslintrc*`, `.prettierrc*`, `.flake8`, `pyproject.toml [tool.ruff]`, `.rubocop.yml`, `.editorconfig`, `biome.json`, `deno.json`, `.clang-format`, etc. Are they present? Are they strict or permissive?
+- **Enforcement**: Are linters run in CI? Are there pre-commit hooks? Is formatting automated or left to developers?
+- **Consistency across the codebase**: Sample files from different parts of the repo. Do they follow the same patterns? Look for inconsistencies in indentation, quote style, import ordering, bracket placement.
+- **Naming conventions**: Are names descriptive? Consistent casing (camelCase, snake_case, PascalCase)? Do variable and function names communicate intent? Are abbreviations used consistently?
+- **Type safety**: For dynamically typed languages — is there type annotation usage? Python type hints (`-> str`, `: int`), TypeScript strict mode (`strict: true` in tsconfig), JSDoc types, Flow types. What percentage of the codebase is typed?
+- **Import organization**: Are imports sorted, grouped (stdlib / third-party / local)? Any circular import risks?
+
+#### Commands to run
 
 ```bash
 # Find linter/formatter configs
-find . -maxdepth 3 -name ".eslintrc*" -o -name ".prettierrc*" -o -name ".flake8" -o -name "pyproject.toml" -o -name ".rubocop.yml" -o -name ".editorconfig" -o -name "biome.json" -o -name "deno.json" | grep -v node_modules
+find . -maxdepth 3 -name ".eslintrc*" -o -name ".prettierrc*" -o -name ".flake8" -o -name "pyproject.toml" -o -name ".rubocop.yml" -o -name ".editorconfig" -o -name "biome.json" -o -name "deno.json" -o -name ".clang-format" -o -name ".stylelint*" | grep -v node_modules
 
+# Check if linters are in CI
+grep -rn "eslint\|prettier\|ruff\|flake8\|rubocop\|biome" .github/workflows/ .gitlab-ci.yml Makefile 2>/dev/null | head -20
+
+# Check for pre-commit hooks
+cat .pre-commit-config.yaml 2>/dev/null || cat .husky/pre-commit 2>/dev/null || cat .git/hooks/pre-commit 2>/dev/null
+
+# Sample type annotation coverage (Python)
+grep -rn "def " --include="*.py" | head -50 | grep -c "\->"
+
+# Check TypeScript strictness
+grep -A5 '"strict"\|"compilerOptions"' tsconfig.json 2>/dev/null
+
+# Import style consistency check
+grep -rn "^import \|^from " --include="*.py" --include="*.ts" --include="*.js" | head -30
+```
+
+#### Rating guide
+
+| Rating | Criteria |
+|---|---|
+| **Strong** | Enforced linting in CI, pre-commit hooks, consistent style throughout, good naming, strong type coverage |
+| **Acceptable** | Linting present but not strictly enforced, minor inconsistencies, some type annotations |
+| **Concerning** | No linting config, inconsistent style across files, poor naming, no type annotations |
+| **Critical** | No discernible style standards, chaotic formatting, names that obscure intent |
+
+---
+
+### 2b. Complexity & Structure (`code-complexity`)
+
+**Goal**: Identify structural complexity that impacts readability and maintainability.
+
+#### What to investigate
+
+- **Function/method length**: Functions over 50 lines are a red flag. Over 100 lines is almost always problematic. Count and list the worst offenders.
+- **Nesting depth**: Deeply nested conditionals (3+ levels) make code hard to follow. Look for arrow-shaped code.
+- **File size**: Files over 500 lines often do too much. Files over 1000 lines are nearly always problematic.
+- **God classes/modules**: Are there modules that everything depends on? Classes with 20+ methods? Files that are central to every feature?
+- **Cyclomatic complexity**: If tools are available, measure it. Otherwise, look for functions with many branches (if/elif/else chains, switch statements, nested ternaries).
+- **Parameter counts**: Functions with 5+ parameters suggest the function is doing too much or needs a config object.
+
+#### Commands to run
+
+```bash
 # Longest files (often problematic)
-find . -name "*.py" -o -name "*.ts" -o -name "*.js" -o -name "*.go" -o -name "*.java" -o -name "*.rb" | grep -v node_modules | grep -v .git | xargs wc -l 2>/dev/null | sort -rn | head -20
-
-# Find TODO/FIXME/HACK comments
-grep -rn "TODO\|FIXME\|HACK\|XXX\|WORKAROUND" --include="*.py" --include="*.ts" --include="*.js" --include="*.go" --include="*.java" --include="*.rb" | wc -l
-
-# Find commented-out code blocks (rough heuristic)
-grep -rn "^[[:space:]]*//.*function\|^[[:space:]]*//.*class\|^[[:space:]]*//.*def \|^[[:space:]]*#.*def \|^[[:space:]]*#.*class " --include="*.py" --include="*.ts" --include="*.js" | head -20
+find . -name "*.py" -o -name "*.ts" -o -name "*.js" -o -name "*.go" -o -name "*.java" -o -name "*.rb" | grep -v node_modules | grep -v .git | grep -v vendor | xargs wc -l 2>/dev/null | sort -rn | head -20
 
 # Find functions longer than 50 lines (Python)
 awk '/^def /{name=$0; start=NR} /^[^ \t]/ && NR>start+50 && start>0{print FILENAME":"start": "name" ("NR-start" lines)"; start=0}' $(find . -name "*.py" -not -path "*/node_modules/*" -not -path "*/.git/*") 2>/dev/null | head -20
 
-# Duplication detection (rough — find files with similar names)
-find . -type f \( -name "*.py" -o -name "*.ts" -o -name "*.js" \) -not -path "*/node_modules/*" -not -path "*/.git/*" | xargs -I{} basename {} | sort | uniq -d
+# Deep nesting detection (4+ levels of indentation)
+grep -rn "^[[:space:]]\{16,\}" --include="*.py" --include="*.ts" --include="*.js" --include="*.go" --include="*.java" | grep -v node_modules | grep -v ".git" | head -20
+
+# Find classes/files with many methods (Python)
+grep -c "def " $(find . -name "*.py" -not -path "*/node_modules/*" -not -path "*/.git/*") 2>/dev/null | awk -F: '$2 > 15' | sort -t: -k2 -rn | head -10
+
+# Functions with many parameters (Python)
+grep -rn "def .*(" --include="*.py" | awk -F'[,]' 'NF > 5' | head -20
+
+# Find deeply nested conditionals
+grep -rn "if.*if.*if\|else.*if.*if" --include="*.py" --include="*.ts" --include="*.js" | head -20
 ```
 
-### Rating guide
+#### Rating guide
 
 | Rating | Criteria |
 |---|---|
-| **Strong** | Enforced linting, consistent style, low complexity, good naming, minimal dead code |
-| **Acceptable** | Linting present but not strict, some inconsistencies, moderate complexity in places |
-| **Concerning** | No linting, inconsistent style, high complexity, significant dead code |
-| **Critical** | Unreadable code, massive functions, pervasive anti-patterns, no discernible standards |
+| **Strong** | No functions over 50 lines, shallow nesting, reasonable file sizes, no god classes |
+| **Acceptable** | A few long functions, occasional deep nesting, most files under 500 lines |
+| **Concerning** | Many functions over 50 lines, widespread deep nesting, multiple files over 1000 lines |
+| **Critical** | Massive functions (100+ lines), pervasive deep nesting, god classes everywhere |
+
+---
+
+### 2c. Anti-Patterns & Tech Debt (`code-debt`)
+
+**Goal**: Identify accumulated technical debt, dead code, and common anti-patterns.
+
+#### What to investigate
+
+- **Dead code**: Unused functions, unreachable branches, imports that are never used. Check if tree-shaking or dead code elimination is configured.
+- **Commented-out code**: Large blocks of commented-out code indicate indecision or abandoned work. A few lines is normal; entire functions or classes is a problem.
+- **Copy-paste duplication**: Files with near-identical content, repeated code blocks across modules, helper functions re-implemented in multiple places.
+- **Magic numbers/strings**: Hardcoded values without named constants. Look for numeric literals in conditionals, string literals used as keys, repeated magic values.
+- **TODO/FIXME/HACK density**: A few TODOs are normal. Hundreds indicate systemic deferred work. Look at their age — old TODOs that never get addressed are tech debt.
+- **Obsolete patterns**: Using deprecated APIs, outdated language features, patterns that were abandoned mid-migration (e.g., half the codebase uses one ORM and half uses another).
+
+#### Commands to run
+
+```bash
+# Count TODO/FIXME/HACK comments
+grep -rn "TODO\|FIXME\|HACK\|XXX\|WORKAROUND" --include="*.py" --include="*.ts" --include="*.js" --include="*.go" --include="*.java" --include="*.rb" | wc -l
+
+# List TODO/FIXME with context
+grep -rn "TODO\|FIXME\|HACK\|XXX\|WORKAROUND" --include="*.py" --include="*.ts" --include="*.js" --include="*.go" --include="*.java" --include="*.rb" | head -30
+
+# Find commented-out code blocks (rough heuristic)
+grep -rn "^[[:space:]]*//.*function\|^[[:space:]]*//.*class\|^[[:space:]]*//.*def \|^[[:space:]]*#.*def \|^[[:space:]]*#.*class " --include="*.py" --include="*.ts" --include="*.js" | head -20
+
+# Duplication detection — files with similar names
+find . -type f \( -name "*.py" -o -name "*.ts" -o -name "*.js" \) -not -path "*/node_modules/*" -not -path "*/.git/*" | xargs -I{} basename {} | sort | uniq -d
+
+# Find magic numbers in conditionals
+grep -rn "if.*[0-9]\{2,\}\|== [0-9]\{2,\}\|> [0-9]\{2,\}\|< [0-9]\{2,\}" --include="*.py" --include="*.ts" --include="*.js" | grep -v node_modules | grep -v test | head -20
+
+# Find deprecated API usage markers
+grep -rn "@deprecated\|DEPRECATED\|deprecated(" --include="*.py" --include="*.ts" --include="*.js" --include="*.java" | head -20
+```
+
+#### Rating guide
+
+| Rating | Criteria |
+|---|---|
+| **Strong** | Minimal dead code, no commented-out blocks, few TODOs that are recent, no duplication |
+| **Acceptable** | Some dead code, a few commented-out sections, moderate TODO count, isolated duplication |
+| **Concerning** | Significant dead code, many commented-out blocks, high TODO density, obvious duplication |
+| **Critical** | Pervasive dead code, massive commented-out sections, hundreds of stale TODOs, rampant copy-paste |
+
+---
+
+### 2d. Error Handling & Resilience (`code-error-handling`)
+
+**Goal**: Assess how the codebase handles failure conditions, propagates errors, and reports problems.
+
+#### What to investigate
+
+- **Error propagation patterns**: Are errors propagated explicitly (Result types, error returns) or implicitly (exceptions)? Is there a consistent strategy?
+- **Catch-all handlers**: Look for bare `except:`, `catch (e)` that does nothing, or broad catches that swallow errors silently. These hide bugs.
+- **Structured error reporting**: Are errors logged with context (user ID, request ID, stack trace)? Is there a centralized error reporting service (Sentry, Bugsnag, etc.)?
+- **Logging practices**: Is logging consistent? Are log levels used appropriately (debug vs info vs warn vs error)? Is there structured logging (JSON) or just print statements?
+- **Graceful degradation**: Does the code handle partial failures? Are there fallback paths, retries with backoff, circuit breakers?
+- **Validation at boundaries**: Is user input validated at API boundaries? Are external API responses validated before use?
+
+#### Commands to run
+
+```bash
+# Find bare/broad exception handlers (Python)
+grep -rn "except:" --include="*.py" | head -20
+grep -rn "except Exception" --include="*.py" | head -20
+
+# Find empty catch blocks (JS/TS)
+grep -rn "catch" --include="*.ts" --include="*.js" -A2 | grep -B1 "{ *}" | head -20
+
+# Find catch blocks that only log (potential swallowed errors)
+grep -rn "catch" --include="*.ts" --include="*.js" --include="*.py" -A3 | grep "console.log\|print(\|pass$" | head -20
+
+# Check for error reporting services
+grep -rn "sentry\|bugsnag\|rollbar\|airbrake\|honeybadger\|datadog" --include="*.py" --include="*.ts" --include="*.js" --include="*.json" --include="*.yaml" --include="*.yml" -i | head -10
+
+# Logging patterns
+grep -rn "logger\.\|logging\.\|console\.\(log\|warn\|error\|debug\|info\)" --include="*.py" --include="*.ts" --include="*.js" | head -30
+
+# Check for structured logging
+grep -rn "structlog\|winston\|pino\|bunyan\|log_level\|LOG_LEVEL" --include="*.py" --include="*.ts" --include="*.js" --include="*.json" -i | head -10
+
+# Find print/console.log used instead of proper logging
+grep -rn "^[[:space:]]*print(" --include="*.py" | grep -v test | grep -v "#" | head -20
+grep -rn "console\.log(" --include="*.ts" --include="*.js" | grep -v test | grep -v node_modules | head -20
+```
+
+#### Rating guide
+
+| Rating | Criteria |
+|---|---|
+| **Strong** | Consistent error strategy, no swallowed errors, structured logging, error reporting service, input validation |
+| **Acceptable** | Mostly consistent error handling, some broad catches, logging present but not structured |
+| **Concerning** | Inconsistent error handling, many swallowed errors, print-statement logging, no error reporting |
+| **Critical** | No error handling strategy, pervasive silent failures, no logging, errors hidden from operators |
 
 ---
 

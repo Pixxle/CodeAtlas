@@ -44,7 +44,10 @@ Example: "No automated testing (0 test files found across 45k LOC) — high regr
 | Dimension | Rating | Confidence |
 |---|---|---|
 | Architecture & Design | [Rating] | [High/Medium/Low] |
-| Code Quality | [Rating] | [High/Medium/Low] |
+| Code Quality: Style & Consistency | [Rating] | [High/Medium/Low] |
+| Code Quality: Complexity & Structure | [Rating] | [High/Medium/Low] |
+| Code Quality: Anti-Patterns & Tech Debt | [Rating] | [High/Medium/Low] |
+| Code Quality: Error Handling & Resilience | [Rating] | [High/Medium/Low] |
 | Dependencies | [Rating] | [High/Medium/Low] |
 | Security | [Rating] | [High/Medium/Low] |
 | Testing | [Rating] | [High/Medium/Low] |
@@ -92,7 +95,10 @@ For multi-repo or mono-repo with multiple services, present a matrix:
 | Dimension | [Service A] | [Service B] | [Service C] | Overall |
 |---|---|---|---|---|
 | Architecture | [Rating] | [Rating] | [Rating] | [Rating] |
-| Code Quality | [Rating] | [Rating] | [Rating] | [Rating] |
+| Code Quality: Style | [Rating] | [Rating] | [Rating] | [Rating] |
+| Code Quality: Complexity | [Rating] | [Rating] | [Rating] | [Rating] |
+| Code Quality: Tech Debt | [Rating] | [Rating] | [Rating] | [Rating] |
+| Code Quality: Error Handling | [Rating] | [Rating] | [Rating] | [Rating] |
 | Dependencies | [Rating] | [Rating] | [Rating] | [Rating] |
 | Security | [Rating] | [Rating] | [Rating] | [Rating] |
 | Testing | [Rating] | [Rating] | [Rating] | [Rating] |

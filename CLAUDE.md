@@ -30,7 +30,11 @@ codeatlas-output/
   analysis/
     <repo-name>/
       architecture.md
-      code-quality.md
+      code-quality/             # Split into focused sub-analyses
+        code-style.md
+        code-complexity.md
+        code-debt.md
+        code-error-handling.md
       dependencies.md
       security.md
       testing.md

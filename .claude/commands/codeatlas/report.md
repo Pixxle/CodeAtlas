@@ -14,7 +14,11 @@ Look for analysis artifacts in the output directory:
   analysis/
     <repo-name>/
       architecture.md
-      code-quality.md
+      code-quality/
+        code-style.md
+        code-complexity.md
+        code-debt.md
+        code-error-handling.md
       dependencies.md
       security.md
       testing.md

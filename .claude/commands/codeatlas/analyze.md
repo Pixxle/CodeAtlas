@@ -52,7 +52,7 @@ Based on discovery, determine:
 
 ## Phase 1: Agent-Based Analysis
 
-For each applicable (dimension × repo) combination, spawn a sub-agent using the Task tool with `subagent_type: "general-purpose"`.
+Analysis runs in two stages. Stage A gathers context about the project's tooling, processes, and environment. Stage B then performs deep code-level analysis, with agents that can focus entirely on their area of responsibility.
 
 ### Sub-Agent Prompt Template
 
@@ -88,26 +88,58 @@ Concrete risks identified, each with severity (High / Medium / Low) and remediat
 Prioritized list of improvements, from most impactful to least.
 ```
 
-### Dimension Catalogue
+### Stage A — Context & Process Dimensions
+
+Run these dimensions first. They establish the project's operational context: how it's built, shipped, maintained, and documented.
+
+| # | Dimension | Slug | Covers |
+|---|-----------|------|--------|
+| 3 | Dependency & Supply Chain | `dependencies` | Outdated deps, CVEs, license risk, lock files |
+| 6 | CI/CD & DevOps | `cicd` | Pipelines, deployment strategy, environment management |
+| 7 | Documentation & Knowledge | `documentation` | READMEs, API docs, ADRs, onboarding quality |
+| 8 | Git Health & Team Dynamics | `git-health` | Commit patterns, bus factor, PR practices |
+| 10 | Infrastructure & Configuration | `infrastructure` | IaC, config management, containers, migrations |
+
+**Execution**: Spawn all Stage A agents in **parallel** across all applicable (repo × dimension) combinations. Use `run_in_background: true` for all agents. **Wait for all Stage A agents to complete before starting Stage B.**
+
+### Stage B — Code Analysis Dimensions
+
+Run these dimensions after Stage A completes. Each agent performs deep code-level investigation and can focus entirely on its area of responsibility.
 
 | # | Dimension | Slug | Covers |
 |---|-----------|------|--------|
 | 1 | Architecture & Design | `architecture` | System structure, modularity, coupling, scalability |
-| 2 | Code Quality & Standards | `code-quality` | Style consistency, complexity, anti-patterns |
-| 3 | Dependency & Supply Chain | `dependencies` | Outdated deps, CVEs, license risk, lock files |
 | 4 | Security Posture | `security` | Secrets, auth, input validation, vulnerability classes |
 | 5 | Testing & Quality Assurance | `testing` | Coverage, test types, test quality, flakiness |
-| 6 | CI/CD & DevOps | `cicd` | Pipelines, deployment strategy, environment management |
-| 7 | Documentation & Knowledge | `documentation` | READMEs, API docs, ADRs, onboarding quality |
-| 8 | Git Health & Team Dynamics | `git-health` | Commit patterns, bus factor, PR practices |
 | 9 | Performance & Scalability | `performance` | Bottlenecks, caching, database patterns, monitoring |
-| 10 | Infrastructure & Configuration | `infrastructure` | IaC, config management, containers, migrations |
 
-### Execution Strategy
+**Execution**: Spawn all Stage B agents in **parallel** across all applicable (repo × dimension) combinations. Use `run_in_background: true` for all agents. **Wait for all Stage B agents to complete before starting Stage C.**
 
-- Spawn sub-agents in **parallel** — group into batches of up to 5 if there are many combinations.
-- Each agent operates on a single (repo × dimension) pair.
-- Use `run_in_background: true` for all agents, then collect results.
+### Stage C — Code Quality Deep-Dive
+
+Run these after Stage B completes. Code Quality & Standards is split into focused sub-agents so each can thoroughly investigate its specific area. All sub-agents write to `codeatlas-output/analysis/[REPO_NAME]/code-quality/`.
+
+| Sub-dimension | Slug | Covers |
+|---------------|------|--------|
+| Style & Consistency | `code-style` | Linter/formatter configs, coding style consistency, naming conventions, type safety & annotations |
+| Complexity & Structure | `code-complexity` | Function/method length, nesting depth, file size, god classes/modules, cyclomatic complexity |
+| Anti-Patterns & Tech Debt | `code-debt` | Dead code, commented-out code, copy-paste duplication, magic numbers/strings, TODO/FIXME/HACK density |
+| Error Handling & Resilience | `code-error-handling` | Error propagation patterns, catch-all/swallowed errors, structured error reporting, logging practices |
+
+For each sub-agent, use the standard sub-agent prompt template but point them to their specific sub-section within the Code Quality dimension in the analysis-dimensions reference file. Each sub-agent saves its output to:
+
+```
+codeatlas-output/analysis/[REPO_NAME]/code-quality/[SUB_SLUG].md
+```
+
+**Execution**: Spawn all Stage C agents in **parallel** across all applicable (repo × sub-dimension) combinations. Use `run_in_background: true` for all agents, then collect results.
+
+### Execution Notes
+
+- Each agent operates on a single (repo × dimension) pair (or repo × sub-dimension for Stage C).
+- Group into batches of up to 5 agents if there are many combinations.
+- Stages execute sequentially: A completes → B starts → B completes → C starts.
+- This staged approach ensures code analysis agents aren't competing for resources, and the deep-dive quality agents get full focus.
 
 ---
 
