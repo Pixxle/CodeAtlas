@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/banner.png" alt="CodeAtlas" width="700">
+</p>
+
 # CodeAtlas
 
 Technical due diligence for code repositories, powered by [Claude Code](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview).
